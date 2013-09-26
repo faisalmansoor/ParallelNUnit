@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using NUnit.Framework;
@@ -82,36 +83,11 @@ namespace ParallelNUnit
             try
             {
                 Assembly assembly = Assembly.LoadFrom(assemblyPath);
-                var categoriesAttribs = from type in assembly.GetTypes()
-                    from attributeData in type.GetCustomAttributesData()
-                    where attributeData.Constructor.DeclaringType == typeof (CategoryAttribute)
-                    select attributeData;
-
-                var categories = new List<string>();
-                foreach (var categoriesAttrib in categoriesAttribs)
-                {
-                    if (categoriesAttrib.NamedArguments != null )
-                    {
-                        var nameArg =
-                            categoriesAttrib.NamedArguments.FirstOrDefault(arg => arg.MemberInfo.Name == "Name");
-
-                        var categoryName = nameArg.TypedValue.Value as String;
-
-                        if (categoryName == null)
-                        {
-                            // Assume the first argument is name
-                            categoryName = categoriesAttrib.ConstructorArguments.FirstOrDefault().Value as String;
-                        }
-
-                        if (!String.IsNullOrWhiteSpace(categoryName))
-                        {
-                            categories.Add(categoryName);
-                        }
-                    }
-                }
-
-                categories = categories.Distinct().ToList();
-
+                var categories = (from type in assembly.GetTypes()
+                    from attribute in type.GetCustomAttributes(typeof (CategoryAttribute), false)
+                    let catAttrib = attribute as CategoryAttribute
+                    select catAttrib.Name).Distinct().ToList();
+                
                 List<NUnitBatch> batches = categories
                     .Select(category => new NUnitBatch {AssemblyPath = assemblyPath, Include = category})
                     .ToList();
