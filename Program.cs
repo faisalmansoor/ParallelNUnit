@@ -2,7 +2,10 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
+using System.Text;
 using System.Threading.Tasks;
+using NUnit.Framework;
 
 namespace ParallelNUnit
 {
@@ -33,7 +36,16 @@ namespace ParallelNUnit
                     return ExitCode.InvalidArguments;
                 }
 
-                var batches = cmdOptions.Assemblies.Select(assemblyPath => new NUnitBatch {AssemblyPath = assemblyPath});
+                var batches = cmdOptions.Assemblies.SelectMany(assemblyPath => GenerateBatches(assemblyPath, cmdOptions.SplitByCategory));
+
+                if (cmdOptions.DryRun)
+                {
+                    foreach (var batch in batches)
+                    {
+                        Log(batch.GetNunitCmdLine());
+                    }
+                    return ExitCode.Success;
+                }
 
                 var parallelOptions = new ParallelOptions
                 {
@@ -42,10 +54,11 @@ namespace ParallelNUnit
 
                 try
                 {
-                    Parallel.ForEach(batches, parallelOptions, batch => RunNunit(cmdOptions.NunitConsoleRunnerPath, batch));
+                    Parallel.ForEach(batches, parallelOptions, batch => RunNunit(cmdOptions, batch));
                 }
                 catch (OperationCanceledException ex)
                 {
+                    Log(ex.ToString());
                 }
             }
             catch (Exception ex)
@@ -59,7 +72,64 @@ namespace ParallelNUnit
             return ExitCode.Success;
         }
 
-        private static void RunNunit(string nunitPath, NUnitBatch batch)
+        private static IEnumerable<NUnitBatch> GenerateBatches(string assemblyPath, bool splitByCategory)
+        {
+            if (!splitByCategory)
+            {
+                return new[] {new NUnitBatch {AssemblyPath = assemblyPath}};
+            }
+
+            try
+            {
+                Assembly assembly = Assembly.LoadFrom(assemblyPath);
+                var categoriesAttribs = from type in assembly.GetTypes()
+                    from attributeData in type.GetCustomAttributesData()
+                    where attributeData.Constructor.DeclaringType == typeof (CategoryAttribute)
+                    select attributeData;
+
+                var categories = new List<string>();
+                foreach (var categoriesAttrib in categoriesAttribs)
+                {
+                    if (categoriesAttrib.NamedArguments != null )
+                    {
+                        var nameArg =
+                            categoriesAttrib.NamedArguments.FirstOrDefault(arg => arg.MemberInfo.Name == "Name");
+
+                        var categoryName = nameArg.TypedValue.Value as String;
+
+                        if (categoryName == null)
+                        {
+                            // Assume the first argument is name
+                            categoryName = categoriesAttrib.ConstructorArguments.FirstOrDefault().Value as String;
+                        }
+
+                        if (!String.IsNullOrWhiteSpace(categoryName))
+                        {
+                            categories.Add(categoryName);
+                        }
+                    }
+                }
+
+                categories = categories.Distinct().ToList();
+
+                List<NUnitBatch> batches = categories
+                    .Select(category => new NUnitBatch {AssemblyPath = assemblyPath, Include = category})
+                    .ToList();
+
+                string excludeAll = string.Join(",", categories);
+
+                batches.Add(new NUnitBatch{AssemblyPath = assemblyPath, Exclude  = excludeAll});
+
+                return batches;
+            }
+            catch (Exception ex)
+            {
+                Log("Failed to split assembly {0} in to categories: {1}", assemblyPath, ex);
+                return new[] {new NUnitBatch {AssemblyPath = assemblyPath}};
+            }
+        }
+
+        private static void RunNunit(CmdOptions cmdOptions, NUnitBatch batch)
         {
             if (batch == null)
             {
@@ -70,11 +140,15 @@ namespace ParallelNUnit
             {
                 Log("Processing {0}", batch);
 
+                if (cmdOptions.DryRun)
+                {
+                    return;
+                }
+
                 var sw = new Stopwatch();
                 sw.Start();
 
-
-                var pinfo = new ProcessStartInfo(nunitPath)
+                var pinfo = new ProcessStartInfo(cmdOptions.NunitConsoleRunnerPath)
                 {
                     Arguments = batch.GetNunitCmdLine(),
                     UseShellExecute = false
@@ -103,26 +177,31 @@ namespace ParallelNUnit
     internal class NUnitBatch
     {
         public string AssemblyPath { get; set; }
-        public string Fixture { get; set; }
+
+        //Category
+        public string Include { get; set; }
+        public string Exclude { get; set; }
 
         public string GetNunitCmdLine()
         {
-            return AssemblyPath;
-//            var sb = new StringBuilder();
-//            sb.AppendFormat("/xml={0}-out.xml ", AssemblyPath);
-//
-//            if (!string.IsNullOrWhiteSpace(Fixture))
-//            {
-//                sb.AppendFormat("/fixture={0} ", Fixture);    
-//            }
-//            
-//            sb.AppendFormat(AssemblyPath);
-//            return sb.ToString();
+            var sb = new StringBuilder();
+            
+            if (!string.IsNullOrWhiteSpace(Include))
+            {
+                sb.AppendFormat("/include:{0} ", Include);    
+            }
+            else if(!string.IsNullOrWhiteSpace(Exclude))
+            {
+                sb.AppendFormat("/exclude:{0} ", Exclude);    
+            }
+            
+            sb.AppendFormat(AssemblyPath);
+            return sb.ToString();
         }
 
         public override string ToString()
         {
-            return String.Format("Assembly: {0}", AssemblyPath);
+            return GetNunitCmdLine();
         }
     }
 }
